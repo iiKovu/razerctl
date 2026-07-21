@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# blackshark — portable launcher for the BlackShark V3 Pro control suite.
+#
+# Runs entirely from this folder: no ~/.local/bin, no systemd. It manages the
+# blacksharkd daemon lifecycle and stores all runtime data under ./data.
+#
+# Usage:
+#   blackshark gui            # ensure daemon, open the settings GUI
+#   blackshark ctl <args...>  # ensure daemon, run the CLI
+#   blackshark start          # start the daemon (idempotent)
+#   blackshark stop           # stop the daemon
+#   blackshark restart        # restart the daemon
+#   blackshark update         # pull this portable fork and rebuild it
+#   blackshark status [--brief]
+set -euo pipefail
+
+# --- resolve this script's own directory (follow symlinks) ------------------
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+# --- self-contained data location -------------------------------------------
+export BLACKSHARK_DATA_DIR="${BLACKSHARK_DATA_DIR:-$DIR/data}"
+mkdir -p "$BLACKSHARK_DATA_DIR"
+LOG="$BLACKSHARK_DATA_DIR/daemon.log"
+PIDFILE="$BLACKSHARK_DATA_DIR/daemon.pid"
+
+DBUS_NAME="net.blackshark1"
+
+die() { echo "blackshark: $*" >&2; exit 1; }
+
+show_help() {
+    cat <<'EOF'
+blackshark — portable launcher for the BlackShark V3 Pro control suite
+
+Usage:
+  ./blackshark gui            Start the daemon and open the settings GUI
+  ./blackshark ctl <args...>  Start the daemon and run the CLI
+  ./blackshark start          Start the daemon
+  ./blackshark stop           Stop the daemon
+  ./blackshark restart        Restart the daemon
+  ./blackshark update         Pull a reviewed update and rebuild the bundle
+  ./blackshark status         Show daemon and headset status
+  ./blackshark status --brief Print active or inactive
+  ./blackshark diagnose       Diagnose dongle state + recovery action
+  ./blackshark anc on|off [1-4]  Set ANC (optionally with strength level)
+EOF
+}
+
+# --- daemon state -----------------------------------------------------------
+
+# True if the daemon owns its D-Bus name (authoritative "ready" check).
+daemon_running() {
+    busctl --user call org.freedesktop.DBus /org/freedesktop/DBus \
+        org.freedesktop.DBus NameHasOwner s "$DBUS_NAME" 2>/dev/null \
+        | grep -q true
+}
+
+start_daemon() {
+    if daemon_running; then
+        return 0
+    fi
+    [ -x "$DIR/blacksharkd" ] || die "daemon binary not found at $DIR/blacksharkd"
+    echo "blackshark: starting daemon…" >&2
+    # Keep diagnostics useful without accumulating logs across sessions.
+    : >"$LOG"
+    nohup "$DIR/blacksharkd" >>"$LOG" 2>&1 &
+    echo $! >"$PIDFILE"
+    disown || true
+    # Wait for it to claim the bus name (up to ~10s).
+    for _ in $(seq 1 50); do
+        daemon_running && return 0
+        sleep 0.2
+    done
+    echo "blackshark: warning — daemon did not claim $DBUS_NAME within 10s (see $LOG)" >&2
+    return 0
+}
+
+stop_daemon() {
+    local pid=""
+    [ -f "$PIDFILE" ] && pid="$(cat "$PIDFILE" 2>/dev/null || true)"
+    if [ -n "$pid" ] && [ -r "/proc/$pid/comm" ] && \
+       [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = "blacksharkd" ]; then
+        kill "$pid" 2>/dev/null || true
+    else
+        # Fallback: match this bundle's daemon binary path exactly.
+        pkill -f "^$DIR/blacksharkd$" 2>/dev/null || true
+    fi
+    rm -f "$PIDFILE"
+}
+
+ensure_daemon() { start_daemon; }
+
+# Return the X11 id for an already mapped GUI window. WM_CLASS is stable across
+# Slint backends, unlike the title, which may change as status text evolves.
+find_gui_window() {
+    command -v xprop >/dev/null 2>&1 || return 1
+
+    local clients window
+    clients="$(xprop -root _NET_CLIENT_LIST 2>/dev/null)" || return 1
+    while read -r window; do
+        if xprop -id "$window" WM_CLASS 2>/dev/null | \
+            grep -Fq '"blackshark-gui"'; then
+            printf '%s\n' "$window"
+            return 0
+        fi
+    done < <(printf '%s\n' "$clients" | grep -oE '0x[0-9a-fA-F]+')
+    return 1
+}
+
+# Focus an existing GUI when the desktop exposes a supported activation tool.
+# Finding the window still counts as success without one: opening a duplicate
+# would be worse than leaving activation to the window manager.
+focus_gui() {
+    local window
+    window="$(find_gui_window)" || return 1
+
+    if command -v bspc >/dev/null 2>&1; then
+        bspc node "$window" -f >/dev/null 2>&1 || true
+    elif command -v xdotool >/dev/null 2>&1; then
+        xdotool windowactivate "$window" >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
+launch_gui() {
+    focus_gui && return 0
+
+    command -v flock >/dev/null 2>&1 || die "flock is required for GUI single-instance handling"
+    exec 9>"$BLACKSHARK_DATA_DIR/gui.lock"
+    if ! flock -n 9; then
+        # Another launch may hold the lock before its X11 window has mapped.
+        # Give that window a short opportunity to appear, then exit cleanly.
+        for _ in $(seq 1 40); do
+            focus_gui && return 0
+            sleep 0.05
+        done
+        return 0
+    fi
+
+    # Close the tiny race between the initial lookup and acquiring the lock.
+    focus_gui && return 0
+    exec "$DIR/blackshark-gui" "$@"
+}
+
+# --- commands ---------------------------------------------------------------
+cmd="${1:-status}"; shift || true
+
+case "$cmd" in
+    daemon)
+        exec "$DIR/blacksharkd" "$@"
+        ;;
+    start)
+        start_daemon
+        ;;
+    stop)
+        stop_daemon
+        echo "stopped"
+        ;;
+    restart)
+        stop_daemon
+        sleep 0.3
+        start_daemon
+        ;;
+    update)
+        exec "$DIR/update.sh" "$@"
+        ;;
+    status)
+        if [ "${1:-}" = "--brief" ]; then
+            daemon_running && echo "active" || echo "inactive"
+        else
+            if daemon_running; then
+                echo "daemon: active"
+                "$DIR/blackshark-ctl" status "$@" || true
+            else
+                echo "daemon: inactive"
+            fi
+        fi
+        ;;
+    diagnose|state)
+        # Report the dongle state (GOOD / BAD / HEADSET-OFF / ABSENT) and the
+        # recovery action. See README "If the controls stop responding".
+        exec "$DIR/blackshark-state" "$@"
+        ;;
+    anc)
+        ensure_daemon
+        exec "$DIR/blackshark-ctl" anc "$@"
+        ;;
+    gui)
+        ensure_daemon
+        launch_gui "$@"
+        ;;
+    ctl)
+        ensure_daemon
+        exec "$DIR/blackshark-ctl" "$@"
+        ;;
+    -h|--help|help)
+        show_help
+        ;;
+    *)
+        die "unknown command '$cmd' (try: gui, ctl, start, stop, restart, status, update)"
+        ;;
+esac

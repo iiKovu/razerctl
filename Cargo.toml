@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "crates/protocol",
+    "crates/device",
+    "crates/blackshark-client",
+    "crates/blackshark-ctl",
+    "crates/blacksharkd",
+    "crates/blackshark-gui",
+]
+resolver = "2"
+
+[profile.release]
+strip = true

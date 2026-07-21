@@ -1,0 +1,19 @@
+# cargo-release workspace configuration
+# Usage: cargo release patch   (0.1.4 → 0.1.5)
+#        cargo release minor   (0.1.4 → 0.2.0)
+#        cargo release major   (0.1.4 → 1.0.0)
+# Add --execute to actually apply (dry-run by default).
+
+# Don't publish to crates.io
+publish = false
+
+# Don't push — push manually after reviewing the commit and tag
+push = false
+
+# Single commit for all crate version bumps in the workspace
+consolidate-commits = true
+
+# Commit and tag message format
+pre-release-commit-message = "chore: bump version to {{version}}"
+tag-name = "v{{version}}"
+tag-message = "Release {{version}}"

@@ -1,0 +1,492 @@
+global Theme {
+    out property <color> background: #0D0D0F;
+    out property <color> foreground: #EBE1D5;
+    out property <color> accent: #FE88C2;
+    out property <color> accent-muted: #38383E;
+    out property <color> dim: #5A585E;
+    out property <color> error: #C05555;
+    out property <color> panel: #17171A;
+}
+
+component SectionLabel inherits Text {
+    color: Theme.dim;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+
+component SegmentButton inherits FocusScope {
+    in property <string> label;
+    in property <bool> selected: false;
+    in property <bool> interactive: true;
+    callback activated();
+
+    enabled: root.interactive;
+    min-height: 34px;
+    preferred-height: 34px;
+    min-width: 58px;
+    horizontal-stretch: 1;
+
+    key-pressed(event) => {
+        if (event.text == Key.Space || event.text == Key.Return) {
+            root.activated();
+            return accept;
+        }
+        return reject;
+    }
+
+    Rectangle {
+        background: root.selected ? Theme.accent : Theme.accent-muted;
+        border-color: root.has-focus ? Theme.foreground :
+            (root.selected ? Theme.accent : Theme.dim);
+        border-width: root.has-focus ? 2px : 1px;
+        border-radius: 7px;
+        opacity: root.interactive ? 1 : 0.42;
+
+        Text {
+            text: root.label;
+            color: root.selected ? Theme.background : Theme.foreground;
+            font-size: 11px;
+            font-weight: root.selected ? 700 : 500;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    TouchArea {
+        enabled: root.interactive;
+        clicked => {
+            root.focus();
+            root.activated();
+        }
+    }
+}
+
+component ToggleSwitch inherits FocusScope {
+    in property <bool> checked: false;
+    in property <bool> interactive: true;
+    callback toggled(bool);
+
+    enabled: root.interactive;
+    min-width: 46px;
+    max-width: 46px;
+    preferred-width: 46px;
+    min-height: 25px;
+    max-height: 25px;
+    preferred-height: 25px;
+
+    key-pressed(event) => {
+        if (event.text == Key.Space || event.text == Key.Return) {
+            root.toggled(!root.checked);
+            return accept;
+        }
+        return reject;
+    }
+
+    Rectangle {
+        background: root.checked ? Theme.accent : Theme.accent-muted;
+        border-color: root.has-focus ? Theme.foreground : Theme.dim;
+        border-width: root.has-focus ? 2px : 1px;
+        border-radius: self.height / 2;
+        opacity: root.interactive ? 1 : 0.42;
+
+        Rectangle {
+            width: 19px;
+            height: 19px;
+            x: root.checked ? parent.width - self.width - 3px : 3px;
+            y: 3px;
+            border-radius: self.height / 2;
+            background: root.checked ? Theme.background : Theme.foreground;
+            animate x { duration: 100ms; easing: ease-out; }
+        }
+    }
+
+    TouchArea {
+        enabled: root.interactive;
+        clicked => {
+            root.focus();
+            root.toggled(!root.checked);
+        }
+    }
+}
+
+component SteppedSlider inherits FocusScope {
+    in property <int> value: 0;
+    in property <int> minimum: 0;
+    in property <int> maximum: 15;
+    in property <bool> interactive: true;
+    private property <bool> editing: false;
+    private property <int> staged-value: root.value;
+    out property <int> preview-value: root.editing ? root.staged-value : root.value;
+    callback committed(int);
+
+    enabled: root.interactive;
+    min-height: 34px;
+    preferred-height: 34px;
+    horizontal-stretch: 1;
+
+    function value-at(position: length) -> int {
+        return max(root.minimum, min(root.maximum,
+            round(root.minimum + (root.maximum - root.minimum) * position / root.width)));
+    }
+
+    key-pressed(event) => {
+        if (event.text == Key.LeftArrow || event.text == Key.DownArrow ||
+            event.text == Key.RightArrow || event.text == Key.UpArrow) {
+            if (!root.editing) {
+                root.staged-value = root.value;
+                root.editing = true;
+            }
+            if (event.text == Key.LeftArrow || event.text == Key.DownArrow) {
+                root.staged-value = max(root.minimum, root.staged-value - 1);
+            } else {
+                root.staged-value = min(root.maximum, root.staged-value + 1);
+            }
+            return accept;
+        }
+        return reject;
+    }
+
+    key-released(event) => {
+        if (root.editing && (event.text == Key.LeftArrow || event.text == Key.DownArrow ||
+            event.text == Key.RightArrow || event.text == Key.UpArrow)) {
+            root.committed(root.preview-value);
+            root.editing = false;
+            return accept;
+        }
+        return reject;
+    }
+
+    Rectangle {
+        x: 7px;
+        y: (parent.height - self.height) / 2;
+        width: parent.width - 14px;
+        height: 6px;
+        border-radius: 3px;
+        background: Theme.accent-muted;
+
+        slider-fill := Rectangle {
+            x: 0px;
+            width: (parent.width * (root.preview-value - root.minimum)) /
+                (root.maximum - root.minimum);
+            height: parent.height;
+            border-radius: parent.border-radius;
+            background: root.interactive ? Theme.accent : Theme.dim;
+        }
+    }
+
+    Rectangle {
+        width: 18px;
+        height: 18px;
+        x: (parent.width - self.width) * (root.preview-value - root.minimum) /
+            (root.maximum - root.minimum);
+        y: (parent.height - self.height) / 2;
+        border-radius: self.height / 2;
+        background: root.interactive ? Theme.accent : Theme.dim;
+        border-color: root.has-focus ? Theme.foreground : Theme.background;
+        border-width: 2px;
+    }
+
+    touch := TouchArea {
+        enabled: root.interactive;
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.focus();
+                root.editing = true;
+                root.staged-value = root.value-at(self.mouse-x);
+            }
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up &&
+                root.editing) {
+                root.staged-value = root.value-at(self.mouse-x);
+                root.committed(root.preview-value);
+                root.editing = false;
+            }
+            if (event.kind == PointerEventKind.cancel) {
+                root.editing = false;
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.staged-value = root.value-at(self.mouse-x);
+            }
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "BlackShark V3 Pro";
+    preferred-width: 680px;
+    preferred-height: 650px;
+    min-width: 520px;
+    min-height: 570px;
+    background: Theme.background;
+    default-font-family: "sans-serif";
+
+    in property <bool> connected: false;
+    in property <int> battery-pct: 0;
+    in property <bool> charging: false;
+    in property <int> eq-preset: 0;
+    in property <int> sidetone: 0;
+    in property <bool> thx-enabled: false;
+    in property <bool> anc-enabled: false;
+    in property <int> anc-level: 1;
+    in property <int> power-savings: 0;
+    in property <string> last-error: "";
+
+    callback set-eq(int);
+    callback set-sidetone(int);
+    callback set-thx(bool);
+    callback set-anc(bool, int);
+    callback set-power-savings(int);
+
+    VerticalLayout {
+        padding: 18px;
+        spacing: 10px;
+
+        Rectangle {
+            min-height: 48px;
+            preferred-height: 48px;
+
+            VerticalLayout {
+                spacing: 2px;
+                Text {
+                    text: "BLACKSHARK V3 PRO";
+                    color: Theme.foreground;
+                    font-size: 21px;
+                    font-weight: 700;
+                }
+                Text {
+                    text: "XBOX WIRELESS · LINUX CONTROL";
+                    color: Theme.dim;
+                    font-size: 10px;
+                    font-weight: 600;
+                    letter-spacing: 1px;
+                }
+            }
+        }
+
+        Rectangle {
+            min-height: 68px;
+            preferred-height: 68px;
+            background: Theme.panel;
+            border-color: Theme.accent-muted;
+            border-width: 1px;
+            border-radius: 9px;
+
+            HorizontalLayout {
+                padding: 13px;
+                spacing: 16px;
+
+                VerticalLayout {
+                    spacing: 5px;
+                    SectionLabel { text: "STATUS"; }
+                    Text {
+                        text: connected ? "CONNECTED" : "DISCONNECTED";
+                        color: connected ? Theme.accent : Theme.error;
+                        font-size: 13px;
+                        font-weight: 700;
+                    }
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                VerticalLayout {
+                    min-width: 210px;
+                    spacing: 6px;
+                    HorizontalLayout {
+                        Text {
+                            text: "BATTERY";
+                            color: Theme.dim;
+                            font-size: 10px;
+                            font-weight: 700;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Text {
+                            text: connected ? battery-pct + "%" + (charging ? " · CHARGING" : "") : "--";
+                            color: connected ? Theme.foreground : Theme.dim;
+                            font-size: 11px;
+                            font-weight: 700;
+                        }
+                    }
+                    Rectangle {
+                        min-height: 6px;
+                        max-height: 6px;
+                        background: Theme.accent-muted;
+                        border-radius: 3px;
+                        Rectangle {
+                            width: connected ? parent.width * battery-pct / 100 : 0px;
+                            height: parent.height;
+                            background: Theme.accent;
+                            border-radius: parent.border-radius;
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            min-height: 110px;
+            preferred-height: 110px;
+            background: Theme.panel;
+            border-color: Theme.accent-muted;
+            border-width: 1px;
+            border-radius: 9px;
+
+            VerticalLayout {
+                padding: 13px;
+                spacing: 9px;
+                HorizontalLayout {
+                    SectionLabel { text: "SOUND"; }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text {
+                        text: "THX SPATIAL";
+                        color: connected ? Theme.foreground : Theme.dim;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                    ToggleSwitch {
+                        checked: thx-enabled;
+                        interactive: connected;
+                        toggled(value) => { set-thx(value); }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    for name[i] in ["DEFAULT", "GAME", "MOVIE", "MUSIC", "CS2"]: SegmentButton {
+                        label: name;
+                        selected: eq-preset == i;
+                        interactive: connected;
+                        activated => { set-eq(i); }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            min-height: 88px;
+            preferred-height: 88px;
+            background: Theme.panel;
+            border-color: Theme.accent-muted;
+            border-width: 1px;
+            border-radius: 9px;
+
+            VerticalLayout {
+                padding: 12px;
+                spacing: 5px;
+                HorizontalLayout {
+                    SectionLabel { text: "MICROPHONE · SIDETONE"; }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text {
+                        text: sidetone-slider.preview-value;
+                        color: connected ? Theme.accent : Theme.dim;
+                        font-size: 13px;
+                        font-weight: 700;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 9px;
+                    Text { text: "0"; color: Theme.dim; font-size: 10px; vertical-alignment: center; }
+                    sidetone-slider := SteppedSlider {
+                        value: sidetone;
+                        minimum: 0;
+                        maximum: 15;
+                        interactive: connected;
+                        committed(value) => { set-sidetone(value); }
+                    }
+                    Text { text: "15"; color: Theme.dim; font-size: 10px; vertical-alignment: center; }
+                }
+            }
+        }
+
+        Rectangle {
+            min-height: 104px;
+            preferred-height: 104px;
+            background: Theme.panel;
+            border-color: Theme.accent-muted;
+            border-width: 1px;
+            border-radius: 9px;
+
+            VerticalLayout {
+                padding: 12px;
+                spacing: 5px;
+                HorizontalLayout {
+                    SectionLabel { text: "NOISE CANCELLATION"; }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text {
+                        text: anc-enabled ? "ON" : "OFF";
+                        color: anc-enabled && connected ? Theme.accent : Theme.dim;
+                        font-size: 11px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    ToggleSwitch {
+                        checked: anc-enabled;
+                        interactive: connected;
+                        toggled(value) => { set-anc(value, anc-level); }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 9px;
+                    Text { text: "STRENGTH"; color: Theme.dim; font-size: 10px; vertical-alignment: center; }
+                    anc-slider := SteppedSlider {
+                        value: anc-level;
+                        minimum: 1;
+                        maximum: 4;
+                        interactive: connected && anc-enabled;
+                        committed(value) => { set-anc(true, value); }
+                    }
+                    Text {
+                        text: anc-slider.preview-value + " / 4";
+                        color: connected && anc-enabled ? Theme.accent : Theme.dim;
+                        font-size: 11px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            min-height: 76px;
+            preferred-height: 76px;
+            background: Theme.panel;
+            border-color: Theme.accent-muted;
+            border-width: 1px;
+            border-radius: 9px;
+
+            VerticalLayout {
+                padding: 11px;
+                spacing: 6px;
+                SectionLabel { text: "AUTOMATIC SHUTOFF"; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    for minutes[i] in [0, 15, 30, 45, 60]: SegmentButton {
+                        label: minutes == 0 ? "OFF" : minutes + " MIN";
+                        selected: power-savings == minutes;
+                        interactive: connected;
+                        activated => { set-power-savings(minutes); }
+                    }
+                }
+            }
+        }
+
+        if last-error != "": Rectangle {
+            min-height: 42px;
+            preferred-height: 42px;
+            background: Theme.error;
+            border-radius: 7px;
+            Text {
+                x: 12px;
+                y: 7px;
+                width: parent.width - 24px;
+                height: parent.height - 14px;
+                text: last-error;
+                color: Theme.foreground;
+                font-size: 11px;
+                wrap: word-wrap;
+                vertical-alignment: center;
+            }
+        }
+    }
+}

@@ -1,0 +1,28 @@
+# runtime data (created by the launcher/daemon)
+/data/
+
+# python bytecode
+__pycache__/
+*.pyc
+
+# local working files, not part of the release
+/probe/
+
+# rust build trees and local dependency cache
+/.build/
+/target/
+
+# portable binaries copied into the repository root by install.sh
+/blackshark-ctl
+/blackshark-gui
+/blacksharkd
+
+# kernel build artifacts
+kernel/*.o
+kernel/*.ko
+kernel/*.mod
+kernel/*.mod.c
+kernel/.*.cmd
+kernel/modules.order
+kernel/Module.symvers
+kernel/.module-common.o

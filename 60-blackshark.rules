@@ -1,0 +1,10 @@
+# Razer BlackShark V3 Pro (PC and Xbox editions) — grant non-root HID access.
+# The daemon (blacksharkd) opens /dev/hidraw* directly via hidapi.
+#
+# Numbered 60- (below 73-seat-late.rules) on purpose: that rule applies the
+# uaccess ACL via `TAG=="uaccess" RUN{builtin}+="uaccess"`, so our TAG+="uaccess"
+# must be set BEFORE it runs. A 99- prefix runs too late and the ACL is skipped.
+# TAG+="uaccess" grants the active local user access (systemd-logind) — no
+# 'users' group membership needed.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0577", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0a55", MODE="0660", TAG+="uaccess"

@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+"""
+blackshark-state — report the dongle's current state and the right action.
+
+States reported:
+  ABSENT      — the dongle (1532:0a55) is not connected.
+  BAD         — the controls don't respond and the volume knob changes the
+                headset's own volume instead of system volume. Fixed by a full
+                power cycle (see the printed guidance).
+  HEADSET-OFF — the dongle is fine but the headset is not powered on / linked.
+  GOOD        — everything works.
+
+If the daemon is already running and reports a valid battery, that is trusted and
+the HID interface is left alone. Otherwise the daemon is briefly stopped (if it
+was running) to query the device directly, then restarted.
+"""
+import glob, os, sys, time, select, fcntl, subprocess, json
+
+RLEN = 64
+DIR = os.path.dirname(os.path.abspath(__file__))
+LAUNCHER = os.path.join(DIR, "blackshark")
+
+# ---- HID plumbing ----------------------------------------------------------
+def _IOC(d, t, nr, size): return (d << 30) | (size << 16) | (ord(t) << 8) | nr
+def HIDIOCGINPUT(l): return _IOC(3, 'H', 0x0A, l)
+
+def find_hidraw():
+    for p in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        try:
+            ue = open(os.path.join(p, "device", "uevent")).read()
+        except OSError:
+            continue
+        if "00001532:00000A55" in ue.upper():
+            return "/dev/" + os.path.basename(p)
+    return None
+
+def dongle_present():
+    return find_hidraw() is not None
+
+def crc(b):
+    c = 0
+    for x in b[:62]:
+        c ^= x
+    return c
+
+def valid_response(data, expected_class):
+    """Require a complete, checksum-correct reply for the requested class."""
+    return (
+        len(data) == RLEN
+        and data[0] == 0x02
+        and data[1] == 0x02
+        and data[2] == 0x60
+        and 3 <= data[6] <= 52
+        and data[10] == expected_class
+        and data[11] == 0x01
+        and data[12] == 0x01
+        and data[62] == crc(data)
+    )
+
+def build(flags, cls, cid, args):
+    b = bytearray(RLEN)
+    b[0] = 0x02; b[2] = 0x60; b[6] = 3 + len(args); b[9] = flags
+    b[10] = cls; b[12] = cid
+    for i, a in enumerate(args):
+        b[13 + i] = a
+    b[62] = crc(b)
+    return bytes(b)
+
+def drain(fd):
+    while True:
+        r, _, _ = select.select([fd], [], [], 0)
+        if not r:
+            return
+        try:
+            os.read(fd, RLEN)
+        except OSError:
+            return
+
+def cmd(fd, flags, cls, cid, args, timeout=1.0):
+    """Send a command, return the response frame matching this class, or None."""
+    drain(fd)
+    try:
+        os.write(fd, build(flags, cls, cid, args))
+    except OSError:
+        return None
+    end = time.time() + timeout
+    while time.time() < end:
+        r, _, _ = select.select([fd], [], [], max(0, end - time.time()))
+        if not r:
+            break
+        try:
+            data = os.read(fd, RLEN)
+        except OSError:
+            break
+        if valid_response(data, cls):
+            return bytes(data)
+    return None
+
+def read_link_event(fd):
+    """Read the last queued headset connect/disconnect notification, if any."""
+    b = bytearray(RLEN); b[0] = 0x02
+    try:
+        fcntl.ioctl(fd, HIDIOCGINPUT(RLEN), b, True)
+    except OSError:
+        return None
+    if b[1] == 0x00 and b[2] == 0x02:  # link/notif event frame
+        if b[3] == 0x01:
+            return "connect"
+        if b[3] == 0xff:
+            return "disconnect"
+    return None
+
+# ---- daemon helpers --------------------------------------------------------
+def daemon_running():
+    try:
+        out = subprocess.run([LAUNCHER, "status", "--brief"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        return out == "active"
+    except Exception:
+        return False
+
+def daemon_status_json():
+    try:
+        ctl = os.path.join(DIR, "blackshark-ctl")
+        out = subprocess.run([ctl, "status"], capture_output=True, text=True, timeout=5).stdout
+        return json.loads(out)
+    except Exception:
+        return None
+
+def daemon_stop():
+    subprocess.run([LAUNCHER, "stop"], capture_output=True, timeout=10)
+
+def daemon_start():
+    subprocess.run([LAUNCHER, "start"], capture_output=True, timeout=15)
+
+def cfg255_loaded():
+    return os.path.isdir("/sys/module/razer_cfg255")
+
+# ---- probe -----------------------------------------------------------------
+def probe():
+    """Own the HID interface and classify. Returns (state, detail)."""
+    hp = find_hidraw()
+    if not hp:
+        return ("ABSENT", {})
+    try:
+        fd = os.open(hp, os.O_RDWR)
+    except OSError as e:
+        return ("ERROR", {"err": f"cannot open {hp}: {e}"})
+    try:
+        link = read_link_event(fd)
+        batt = cmd(fd, 0x80, 0x21, 0x00, [0x00])         # battery
+        init = cmd(fd, 0x00, 0x02, 0x00, [0x00])         # dongle capability init
+        if batt is not None:
+            return ("GOOD", {"battery": batt[13], "charging": bool(batt[14]), "link": link})
+        if init is not None:
+            return ("HEADSET-OFF", {"link": link})
+        return ("BAD", {"link": link})
+    finally:
+        os.close(fd)
+
+# ---- report ----------------------------------------------------------------
+GUIDANCE = {
+    "ABSENT":
+        "The dongle (1532:0a55) is not detected.\n"
+        "  → Plug it into its usual USB port and set the switch to USB mode.",
+    "GOOD":
+        "Everything works — battery, sidetone, ANC, and the volume knob drives\n"
+        "  system volume.\n"
+        "  → Keep razer-cfg255 loaded before any future dongle enumeration.",
+    "HEADSET-OFF":
+        "The dongle is fine but the headset is not powered on / not linked yet.\n"
+        "  → Turn the headset on and wait a few seconds.",
+    "BAD": "The dongle enumerated without its vendor control channel.",
+    "ERROR":
+        "Could not probe the HID interface (permission or busy).",
+}
+
+def log_verdict(label, state, detail):
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"{ts}  [{label}] STATE={state} {detail}"
+    try:
+        with open(os.path.join(DIR, "probe", "results.log"), "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+def main():
+    args = sys.argv[1:]
+    brief = "--brief" in args
+    label = None
+    if "--log" in args:
+        i = args.index("--log")
+        label = args[i + 1] if i + 1 < len(args) else "diagnose"
+
+    if not dongle_present():
+        state, detail = "ABSENT", {}
+    else:
+        # If the daemon already has a good battery, trust it and don't disturb.
+        was_running = daemon_running()
+        js = daemon_status_json() if was_running else None
+        if js and js.get("connected") and isinstance(js.get("battery_percentage"), int) \
+           and 0 < js["battery_percentage"] <= 100:
+            state, detail = "GOOD", {"battery": js["battery_percentage"],
+                                     "charging": bool(js.get("charging")), "via": "daemon"}
+        else:
+            # Need to own the interface for a clean probe.
+            if was_running:
+                daemon_stop(); time.sleep(0.4)
+            state, detail = probe()
+            if was_running:
+                daemon_start()
+
+    if label:
+        log_verdict(label, state, detail)
+
+    module_loaded = cfg255_loaded()
+
+    if brief:
+        print(state)
+        return 0 if state == "GOOD" else 1
+
+    icon = {"GOOD": "✓", "HEADSET-OFF": "•", "BAD": "✗", "ABSENT": "✗", "ERROR": "!"}.get(state, "?")
+    print(f"{icon} STATE: {state}")
+    if state == "GOOD" and "battery" in detail:
+        ch = " (charging)" if detail.get("charging") else ""
+        print(f"  battery: {detail['battery']}%{ch}"
+              + (f"   [reported by running daemon]" if detail.get("via") == "daemon" else ""))
+    if detail.get("link"):
+        print(f"  headset link: {detail['link']}")
+    print(f"  razer-cfg255: {'loaded' if module_loaded else 'not loaded'}")
+    print()
+    print(GUIDANCE.get(state, ""))
+    if state == "BAD":
+        if module_loaded:
+            print("  → Re-enumerate the dongle now that razer-cfg255 is armed: unplug and")
+            print("    reconnect it, or switch USB → XBOX → USB. Then rerun diagnose.")
+        else:
+            print("  → Load the compatibility module, then re-enumerate the dongle:")
+            print("      sudo modprobe razer-cfg255")
+            print("    After reconnecting it, rerun diagnose.")
+    return 0 if state == "GOOD" else 1
+
+if __name__ == "__main__":
+    sys.exit(main())

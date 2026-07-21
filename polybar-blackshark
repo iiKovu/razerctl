@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Polybar adapter for the portable BlackShark bundle.
+set -uo pipefail
+
+DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LAUNCHER="$DIR/blackshark"
+CTL="$DIR/blackshark-ctl"
+
+get_status() {
+    local json
+
+    # A status refresh must never override an explicit `./blackshark stop`.
+    [[ "$(timeout 2 "$LAUNCHER" status --brief 2>/dev/null)" == "active" ]] ||
+        return 1
+    json="$(timeout 3 "$CTL" status 2>/dev/null)" || return 1
+    jq -e -c 'select(type == "object")' <<<"$json" 2>/dev/null
+}
+
+print_status() {
+    local json connected battery charging anc
+
+    if ! json="$(get_status)"; then
+        printf '\n'
+        return
+    fi
+
+    connected="$(jq -r '.connected // false' <<<"$json")"
+    if [[ "$connected" != "true" ]]; then
+        printf '\n'
+        return
+    fi
+
+    battery="$(jq -r '.battery_percentage // empty' <<<"$json")"
+    charging="$(jq -r '.charging // false' <<<"$json")"
+    anc="$(jq -r '.anc_enabled // false' <<<"$json")"
+
+    if [[ "$battery" =~ ^([0-9]|[1-9][0-9]|100)$ ]]; then
+        printf '%%{T3}%%{T-} %s%%' "$battery"
+    else
+        printf '%%{T3}%%{T-} --'
+    fi
+
+    [[ "$charging" == "true" ]] && printf ' %%{T3}%%{T-}'
+    [[ "$anc" == "true" ]] && printf ' ANC'
+    printf '\n'
+}
+
+case "${1:-status}" in
+    status)
+        print_status
+        ;;
+    *)
+        echo "usage: $0 [status]" >&2
+        exit 2
+        ;;
+esac
